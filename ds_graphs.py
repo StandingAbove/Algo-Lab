@@ -23,7 +23,7 @@ def graph_deep_copy_dfs (node: GraphNode) -> GraphNode:
     if not node:
         return None
     return dfs(node)
-def dfs(node: GraphNode, clone_map{}) -> GraphNode:
+def dfs(node: GraphNode, clone_map = {}) -> GraphNode:
     if node in clone_map:
         return clone_map[node]
     cloned_node = GraphNode(node.val)
