@@ -1,19 +1,6 @@
 # app.py
 from __future__ import annotations
 
-"""
-Streamlit UI (yfinance + optional Groq)
-
-What this UI does:
-- Sidebar inputs (ticker, lookback, chart options, outlook options)
-- KPI tiles
-- Candlestick (or close-line) chart + moving averages
-- Volume chart
-- Future outlook chart (Monte Carlo quantile bands + sample paths)
-- Agent report (Groq if configured, otherwise fallback)
-- CSV download
-"""
-
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -25,10 +12,6 @@ import plotly.graph_objects as go
 from agent_engine import run_agentic_research
 
 
-# -----------------------------
-# Page config + styling
-# -----------------------------
-
 st.set_page_config(page_title="Quant Research Agent", page_icon="Q", layout="wide")
 
 st.markdown(
@@ -36,21 +19,17 @@ st.markdown(
     <style>
       .block-container { padding-top: 1.1rem; padding-bottom: 2rem; }
       div[data-testid="stMetric"] { background: rgba(255,255,255,0.03); padding: 12px; border-radius: 14px; }
-      .small-note { opacity: 0.8; font-size: 0.92rem; }
+      .small-note { opacity: 0.85; font-size: 0.92rem; }
       .card { background: rgba(255,255,255,0.03); padding: 14px; border-radius: 14px; }
-      .section-title { margin-top: 0.2rem; margin-bottom: 0.6rem; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.title("Quant Research Agent")
-st.caption("Data source: yfinance. Report: Groq (optional).")
+st.caption("yfinance + LangGraph + LlamaIndex (optional) + Groq (optional)")
 
-
-# -----------------------------
-# Sidebar controls
-# -----------------------------
 
 with st.sidebar:
     st.header("Inputs")
@@ -70,36 +49,33 @@ with st.sidebar:
     show_sample_paths = st.checkbox("Show sample paths", value=True)
 
     st.markdown("---")
+    st.subheader("Retrieval (LlamaIndex)")
+    docs_dir = st.text_input("Docs directory", value="./data/docs")
+    st.caption("Put pdf/md/txt files here to ground the report.")
+
+    st.markdown("---")
     run = st.button("Run research", type="primary", use_container_width=True)
 
     st.markdown("---")
     st.markdown(
-        '<div class="small-note">Tip: If a ticker fails, try an exchange suffix (example: 7203.T).</div>',
+        '<div class="small-note">Tip: Try exchange suffixes for non-US tickers (example: 7203.T).</div>',
         unsafe_allow_html=True,
     )
 
 
-# -----------------------------
-# Caching
-# -----------------------------
-
 @st.cache_data(show_spinner=False)
-def _run_cached(ticker_: str, lookback_years_: int, horizon_days_: int, n_sims_: int) -> dict:
+def _run_cached(ticker_: str, lookback_years_: int, horizon_days_: int, n_sims_: int, docs_dir_: str) -> dict:
     out = run_agentic_research(
         ticker=ticker_,
         lookback_years=lookback_years_,
         horizon_days=horizon_days_,
         n_sims=n_sims_,
+        docs_dir=docs_dir_,
     )
-    # Keep a copy to make Streamlit cache stable
     out2 = dict(out)
     out2["df"] = out["df"].copy()
     return out2
 
-
-# -----------------------------
-# Plot helpers
-# -----------------------------
 
 def _plot_price(df: pd.DataFrame, chart_type_: str, show_mas_: bool) -> go.Figure:
     fig = go.Figure()
@@ -146,13 +122,6 @@ def _plot_volume(df: pd.DataFrame) -> go.Figure:
 
 
 def _plot_outlook(outlook: dict, show_paths: bool) -> go.Figure:
-    """
-    Plot:
-    - median forecast
-    - 25-75 band
-    - 10-90 band
-    - optional sample simulated paths
-    """
     bands = outlook["bands"]
     H = int(outlook["horizon_days"])
     x = list(range(1, H + 1))
@@ -165,7 +134,6 @@ def _plot_outlook(outlook: dict, show_paths: bool) -> go.Figure:
 
     fig = go.Figure()
 
-    # Optional sample paths (lightweight visual)
     if show_paths:
         for p in outlook["sample_paths"]:
             fig.add_trace(
@@ -180,11 +148,11 @@ def _plot_outlook(outlook: dict, show_paths: bool) -> go.Figure:
                 )
             )
 
-    # 10-90 band (shaded)
+    # 10-90 band
     fig.add_trace(go.Scatter(x=x, y=q10, mode="lines", line=dict(width=1), name="10th"))
     fig.add_trace(go.Scatter(x=x, y=q90, mode="lines", line=dict(width=1), name="90th", fill="tonexty"))
 
-    # 25-75 band (shaded)
+    # 25-75 band
     fig.add_trace(go.Scatter(x=x, y=q25, mode="lines", line=dict(width=1), name="25th"))
     fig.add_trace(go.Scatter(x=x, y=q75, mode="lines", line=dict(width=1), name="75th", fill="tonexty"))
 
@@ -201,10 +169,6 @@ def _plot_outlook(outlook: dict, show_paths: bool) -> go.Figure:
     return fig
 
 
-# -----------------------------
-# Main
-# -----------------------------
-
 if not run:
     st.info("Use the left sidebar to run the research.")
     st.stop()
@@ -213,9 +177,9 @@ if not ticker:
     st.error("Enter a ticker symbol.")
     st.stop()
 
-with st.spinner("Fetching data and building report..."):
+with st.spinner("Running agent workflow (LangGraph)..."):
     try:
-        out = _run_cached(ticker, int(lookback_years), int(horizon_days), int(n_sims))
+        out = _run_cached(ticker, int(lookback_years), int(horizon_days), int(n_sims), docs_dir)
     except Exception as e:
         st.error(str(e))
         st.stop()
@@ -225,9 +189,10 @@ kpis = out["kpis"]
 tech = out["tech"]
 outlook = out["outlook"]
 report = out["report"]
-audit = out["audit"]
+retrieved = out.get("retrieved", {"enabled": False, "snippets": []})
+audit = out.get("audit", {})
 
-# KPI tiles
+# KPI row
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Last Close", f"{kpis['last_close']:.2f}")
 c2.metric("CAGR", f"{kpis['cagr']*100:.2f}%")
@@ -238,7 +203,9 @@ c6.metric("Max Drawdown", f"{kpis['max_drawdown']*100:.2f}%")
 
 st.markdown("")
 
-tab_dash, tab_report, tab_export, tab_debug = st.tabs(["Dashboard", "Report", "Export", "Debug"])
+tab_dash, tab_report, tab_sources, tab_export, tab_debug = st.tabs(
+    ["Dashboard", "Report", "Retrieved Context", "Export", "Debug"]
+)
 
 with tab_dash:
     left, right = st.columns([2, 1], gap="large")
@@ -250,7 +217,7 @@ with tab_dash:
 
         st.subheader("Future outlook (stochastic simulation)")
         st.plotly_chart(_plot_outlook(outlook, show_paths=show_sample_paths), use_container_width=True)
-        st.caption("Outlook is a simulation based on historical return distribution. It is not a prediction.")
+        st.caption("Outlook is a simulation based on historical returns. It is not a prediction.")
 
     with right:
         st.subheader("Snapshot")
@@ -259,7 +226,6 @@ with tab_dash:
         st.write(f"Rows: {kpis['days']}")
         st.write(f"Above 200D MA: {'Yes' if tech['above_ma200'] else 'No'}")
         st.write(f"50D > 200D: {'Yes' if tech['ma50_gt_ma200'] else 'No'}")
-
         if tech.get("ma20") is not None:
             st.write(f"MA20: {tech['ma20']:.2f}")
         if tech.get("ma50") is not None:
@@ -281,6 +247,16 @@ with tab_dash:
 with tab_report:
     st.subheader("Agent report")
     st.markdown(report)
+
+with tab_sources:
+    st.subheader("Retrieved context (LlamaIndex)")
+    if retrieved.get("enabled") and retrieved.get("snippets"):
+        st.write(f"Docs directory: `{retrieved.get('docs_dir')}`")
+        for s in retrieved["snippets"][:8]:
+            st.write(f"- {s}")
+    else:
+        st.write("Retrieval is disabled or no documents were found.")
+        st.write("Add files to the docs directory (pdf/md/txt) and run again.")
 
 with tab_export:
     st.subheader("Export")
