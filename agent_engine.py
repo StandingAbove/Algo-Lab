@@ -153,7 +153,7 @@ def synthesis_node(state: ResearchState) -> ResearchState:
     # Prefer Groq (fast, no OpenAI quota). Fallback to OpenAI if configured.
     if groq_key and ChatGroq is not None:
         llm = ChatGroq(
-            model=os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile"),
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
             temperature=0.1,
             api_key=groq_key,
         )
