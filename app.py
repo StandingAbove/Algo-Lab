@@ -29,9 +29,65 @@ st.markdown(
       }
 
       [data-testid="stSidebar"] {
-        border-right: 1px solid rgba(148, 163, 184, 0.25);
-        background: rgba(8, 14, 26, 0.65);
-        backdrop-filter: blur(12px);
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+        background: linear-gradient(180deg, rgba(8, 12, 20, 0.98), rgba(6, 10, 18, 0.95));
+        backdrop-filter: blur(18px);
+      }
+
+      [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+        color: rgba(226, 232, 240, 0.78);
+      }
+
+      .sidebar-header {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        margin-bottom: 1rem;
+      }
+
+      .sidebar-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        color: #f8fafc;
+      }
+
+      .sidebar-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: rgba(56, 189, 248, 0.16);
+        border: 1px solid rgba(56, 189, 248, 0.45);
+        color: #7dd3fc;
+        font-size: 0.72rem;
+        font-weight: 600;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        width: fit-content;
+      }
+
+      .sidebar-card {
+        background: rgba(15, 23, 42, 0.65);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 14px;
+        padding: 0.85rem 0.9rem;
+        margin-bottom: 0.85rem;
+        box-shadow: 0 10px 26px rgba(15, 23, 42, 0.35);
+      }
+
+      .sidebar-card-title {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #e2e8f0;
+        margin-bottom: 0.35rem;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+      }
+
+      .sidebar-divider {
+        height: 1px;
+        background: rgba(148, 163, 184, 0.2);
+        margin: 0.6rem 0;
       }
 
       [data-testid="stMetric"] {
@@ -130,21 +186,39 @@ plot_theme = dict(
 )
 
 with st.sidebar:
-    st.subheader("Inputs")
+    st.markdown(
+        """
+        <div class="sidebar-header">
+          <div class="sidebar-chip">TRADING DESK</div>
+          <div class="sidebar-title">Research Controls</div>
+          <p>Configure the market scope and simulation engine.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Market Focus</div>', unsafe_allow_html=True)
     ticker = st.text_input("Ticker", "NVDA")
     lookback = st.selectbox("Lookback (years)", [1, 3, 5, 10], index=2)
+    st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
     horizon = st.slider("Outlook horizon (days)", 20, 252, 60)
     sims = st.selectbox("Monte Carlo simulations", [1000, 3000, 5000], index=1)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.divider()
-    st.subheader("Context")
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Context Layer</div>', unsafe_allow_html=True)
     docs_dir = st.text_input("Local docs dir (optional)", "./data/docs")
     use_sec = st.toggle("If no local docs, pull SEC filing", value=True)
     forms = st.multiselect("Filing types", ["10-K", "10-Q", "S-1"], default=["10-K", "10-Q", "S-1"])
     sec_max_chars = st.slider("SEC text max length", 3000, 20000, 12000, step=1000)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.divider()
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Run</div>', unsafe_allow_html=True)
+    st.caption("Launch the agentic workflow and generate the dashboard.")
     run = st.button("Run research", type="primary")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 if not run:
     st.info("Set inputs and click Run research.")
