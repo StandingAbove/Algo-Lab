@@ -1,13 +1,12 @@
-# agent_engine.py
 from __future__ import annotations
+
+import os, time
+from typing import TypedDict, Dict, Any, List
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-import os
-from typing import Any, Dict, Optional, TypedDict
-
-import pandas as pd
+from langgraph.graph import StateGraph, END
 
 from tool import (
     fetch_prices_yfinance,
@@ -15,232 +14,228 @@ from tool import (
     compute_kpis,
     monte_carlo_outlook,
     retrieve_context_llamaindex,
+    sec_fetch_latest_filing_text,
 )
 
-# LangGraph
-from langgraph.graph import StateGraph, END
-
-# Optional Groq
 try:
-    from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage
 except Exception:
-    ChatGroq = None  # type: ignore
-    SystemMessage = None  # type: ignore
-    HumanMessage = None  # type: ignore
+    SystemMessage = None
+    HumanMessage = None
+
+try:
+    from langchain_groq import ChatGroq
+except Exception:
+    ChatGroq = None
+
+try:
+    from langchain_openai import ChatOpenAI
+except Exception:
+    ChatOpenAI = None
 
 
 class ResearchState(TypedDict, total=False):
-    # Inputs
     ticker: str
     lookback_years: int
     horizon_days: int
     n_sims: int
-    docs_dir: str
 
-    # Data artifacts
-    df: pd.DataFrame
+    docs_dir: str
+    use_sec: bool
+    sec_forms: List[str]
+    sec_max_chars: int
+
+    df: Any
     audit: Dict[str, Any]
     kpis: Dict[str, Any]
     tech: Dict[str, Any]
     outlook: Dict[str, Any]
     retrieved: Dict[str, Any]
-
-    # Output
     report: str
+
+    trace: List[Dict[str, Any]]
     error: str
 
 
-def _validate(state: ResearchState) -> ResearchState:
-    ticker = (state.get("ticker") or "").strip().upper()
+def _trace(state: ResearchState, node: str, start: float) -> Dict[str, Any]:
+    tr = list(state.get("trace", []))
+    tr.append({"node": node, "ms": int((time.perf_counter() - start) * 1000)})
+    return {"trace": tr}
+
+
+def validate_node(state: ResearchState) -> ResearchState:
+    t0 = time.perf_counter()
+    ticker = state["ticker"].strip().upper()
     if not ticker:
         return {"error": "Ticker is empty."}
 
-    lookback_years = int(state.get("lookback_years", 5))
-    horizon_days = int(state.get("horizon_days", 60))
-    n_sims = int(state.get("n_sims", 3000))
-    docs_dir = str(state.get("docs_dir", os.getenv("DOCS_DIR", "./data/docs")))
-
-    if lookback_years < 1 or lookback_years > 20:
-        return {"error": "Lookback years must be between 1 and 20."}
-    if horizon_days < 5 or horizon_days > 252:
-        return {"error": "Horizon must be between 5 and 252 trading days."}
-    if n_sims < 200 or n_sims > 20000:
-        return {"error": "Simulations must be between 200 and 20000."}
-
     return {
         "ticker": ticker,
-        "lookback_years": lookback_years,
-        "horizon_days": horizon_days,
-        "n_sims": n_sims,
-        "docs_dir": docs_dir,
+        "lookback_years": int(state.get("lookback_years", 5)),
+        "horizon_days": int(state.get("horizon_days", 60)),
+        "n_sims": int(state.get("n_sims", 3000)),
+        "docs_dir": state.get("docs_dir", "./data/docs"),
+        "use_sec": bool(state.get("use_sec", True)),
+        "sec_forms": list(state.get("sec_forms", ["10-K", "10-Q", "S-1"])),
+        "sec_max_chars": int(state.get("sec_max_chars", 12000)),
+        **_trace(state, "validate", t0),
     }
 
 
-def _fetch_data(state: ResearchState) -> ResearchState:
-    df, audit = fetch_prices_yfinance(
-        ticker=state["ticker"],
-        lookback_years=state["lookback_years"],
-        interval="1d",
-    )
-    return {"df": df, "audit": audit}
+def fetch_node(state: ResearchState) -> ResearchState:
+    t0 = time.perf_counter()
+    df, audit = fetch_prices_yfinance(state["ticker"], state["lookback_years"])
+    return {"df": df, "audit": audit, **_trace(state, "fetch_data", t0)}
 
 
-def _compute_numbers(state: ResearchState) -> ResearchState:
+def numbers_node(state: ResearchState) -> ResearchState:
+    t0 = time.perf_counter()
     df = compute_technicals(state["df"])
     kpis = compute_kpis(df)
 
     last = df.iloc[-1]
     tech = {
-        "above_ma200": bool(last.get("Above_MA200", False)),
-        "ma50_gt_ma200": bool(last.get("MA50_gt_MA200", False)),
-        "ma20": None if pd.isna(last.get("MA20")) else float(last["MA20"]),
-        "ma50": None if pd.isna(last.get("MA50")) else float(last["MA50"]),
-        "ma200": None if pd.isna(last.get("MA200")) else float(last["MA200"]),
+        "above_ma200": bool(last["Above_MA200"]),
+        "ma50_gt_ma200": bool(last["MA50_gt_MA200"]),
     }
 
-    return {"df": df, "kpis": kpis, "tech": tech}
+    return {"df": df, "kpis": kpis, "tech": tech, **_trace(state, "compute_numbers", t0)}
 
 
-def _simulate_outlook(state: ResearchState) -> ResearchState:
+def outlook_node(state: ResearchState) -> ResearchState:
+    t0 = time.perf_counter()
     outlook = monte_carlo_outlook(
         state["df"],
         horizon_days=state["horizon_days"],
         n_sims=state["n_sims"],
-        seed=7,
-        sample_paths=200,
     )
-    return {"outlook": outlook}
+    return {"outlook": outlook, **_trace(state, "simulate_outlook", t0)}
 
 
-def _retrieve_context(state: ResearchState) -> ResearchState:
-    """
-    LlamaIndex retrieval is optional. If docs_dir is missing/empty or llama-index isn't installed,
-    retrieved["enabled"] will be False.
-    """
-    q = (
-        f"{state['ticker']} outlook, risks, catalysts, business context. "
-        f"Date range {state['kpis']['start_date']} to {state['kpis']['end_date']}."
+def retrieval_node(state: ResearchState) -> ResearchState:
+    t0 = time.perf_counter()
+
+    # 1) Try local docs with LlamaIndex (never crashes)
+    retrieved = retrieve_context_llamaindex(
+        query=f"{state['ticker']} business risks and catalysts",
+        docs_dir=state["docs_dir"],
     )
-    retrieved = retrieve_context_llamaindex(query=q, docs_dir=state["docs_dir"], top_k=4)
-    return {"retrieved": retrieved}
+
+    # 2) If no docs AND SEC enabled, fall back to SEC filing text
+    if not retrieved.get("enabled") and state.get("use_sec", True):
+        try:
+            retrieved = sec_fetch_latest_filing_text(
+                ticker=state["ticker"],
+                forms=state.get("sec_forms", ["10-K", "10-Q", "S-1"]),
+                max_chars=int(state.get("sec_max_chars", 12000)),
+            )
+        except Exception as e:
+            retrieved = {
+                "enabled": False,
+                "source": "sec",
+                "reason": str(e),
+                "snippets": [],
+            }
+
+    return {"retrieved": retrieved, **_trace(state, "retrieve_context", t0)}
 
 
-def _get_llm() -> Any:
-    if ChatGroq is None:
-        raise RuntimeError("langchain_groq not installed.")
-    if not os.getenv("GROQ_API_KEY"):
-        raise RuntimeError("Missing GROQ_API_KEY.")
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    return ChatGroq(model=model, temperature=0.1)
+def synthesis_node(state: ResearchState) -> ResearchState:
+    t0 = time.perf_counter()
 
+    openai_key = os.getenv("GPT_API_KEY", "").strip()
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
 
-def _synthesize_report(state: ResearchState) -> ResearchState:
-    ticker = state["ticker"]
-    k = state["kpis"]
-    t = state["tech"]
-    o = state["outlook"]
-    r = state.get("retrieved", {"enabled": False, "snippets": []})
+    if (not groq_key or ChatGroq is None) and (not openai_key or ChatOpenAI is None):
+        report = f"Deterministic report for {state['ticker']} (no LLM key configured)."
+        return {"report": report, **_trace(state, "synthesize_report", t0)}
 
-    # Deterministic fallback if Groq is not configured
-    if not os.getenv("GROQ_API_KEY") or ChatGroq is None:
-        ctx = ""
-        if r.get("enabled") and r.get("snippets"):
-            ctx = "\n\n### Retrieved context\n" + "\n".join(f"- {s}" for s in r["snippets"][:4])
-
-        report = (
-            f"## `{ticker}` research note\n\n"
-            f"### Snapshot\n"
-            f"- Date range: **{k['start_date']}** to **{k['end_date']}**\n"
-            f"- Last close: **{k['last_close']:.2f}**\n"
-            f"- CAGR: **{k['cagr']*100:.2f}%**\n"
-            f"- Ann. vol: **{k['ann_vol']*100:.2f}%**\n"
-            f"- Max drawdown: **{k['max_drawdown']*100:.2f}%**\n\n"
-            f"### Technical context\n"
-            f"- Above 200D MA: **{t['above_ma200']}**\n"
-            f"- 50D > 200D: **{t['ma50_gt_ma200']}**\n\n"
-            f"### Future outlook (simulation)\n"
-            f"- Horizon: **{o['horizon_days']}** trading days\n"
-            f"- Simulations: **{o['n_sims']}**\n"
-            f"- Implied drift (ann): **{o['mu_ann']*100:.2f}%**\n"
-            f"- Implied vol (ann): **{o['vol_ann']*100:.2f}%**\n"
-            f"- P(final > spot): **{o['prob_finish_up']*100:.1f}%**\n\n"
-            f"Note: outlook is a stochastic simulation based on historical returns, not a prediction."
-            f"{ctx}"
+    # Prefer Groq (fast, no OpenAI quota). Fallback to OpenAI if configured.
+    if groq_key and ChatGroq is not None:
+        llm = ChatGroq(
+            model=os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile"),
+            temperature=0.1,
+            api_key=groq_key,
         )
-        return {"report": report}
+    elif openai_key and ChatOpenAI is not None:
+        llm = ChatOpenAI(
+            model=os.getenv("OPENAI_MODEL", "gpt-5"),
+            temperature=0.1,
+            api_key=openai_key,
+        )
+    else:
+        raise RuntimeError(
+            "No LLM configured. Set GROQ_API_KEY (recommended) or GPT_API_KEY."
+        )
 
-    llm = _get_llm()
+    context = state.get("retrieved", {})
+    context_snips = context.get("snippets", [])
 
-    snippets = r.get("snippets") or []
-    context_block = ""
-    if r.get("enabled") and snippets:
-        context_block = "\n".join(f"- {s}" for s in snippets[:4])
-
-    system = (
-        "You are a cautious financial research assistant.\n"
-        "Write a concise markdown note.\n"
-        "Rules:\n"
-        "1) Do not invent numbers.\n"
-        "2) Use **bold** only for the provided KPIs/stats.\n"
-        "3) Use backticks only for the ticker.\n"
-        "4) Under ~260 words.\n"
-        "5) Clearly label the future outlook as a simulation, not a prediction.\n"
+    sys = SystemMessage(
+        content=(
+            "You are a cautious quantitative research assistant.\n"
+            "Write a concise markdown research note.\n"
+            "Do not hallucinate numbers.\n"
+            "If you reference SEC content, label it as extracted text and cite the filing type/date.\n"
+            "Label forecasts as simulations (Monte Carlo).\n"
+        )
     )
 
-    user = (
-        f"Ticker: {ticker}\n"
-        f"Date range: {k['start_date']} to {k['end_date']}\n"
-        f"Last close: {k['last_close']:.2f}\n"
-        f"CAGR: {k['cagr']*100:.2f}%\n"
-        f"Annual return: {k['ann_return']*100:.2f}%\n"
-        f"Annual vol: {k['ann_vol']*100:.2f}%\n"
-        f"Sharpe (rf=0): {k['sharpe_0rf']:.2f}\n"
-        f"Max drawdown: {k['max_drawdown']*100:.2f}%\n"
-        f"Above 200D MA: {t['above_ma200']}\n"
-        f"50D > 200D: {t['ma50_gt_ma200']}\n"
-        f"Outlook horizon (days): {o['horizon_days']}\n"
-        f"Outlook simulations: {o['n_sims']}\n"
-        f"Implied drift (ann): {o['mu_ann']*100:.2f}%\n"
-        f"Implied vol (ann): {o['vol_ann']*100:.2f}%\n"
-        f"P(final > spot): {o['prob_finish_up']*100:.1f}%\n\n"
-        f"Retrieved context (if any):\n{context_block}\n\n"
-        "Write sections: Summary, Risk, Future outlook (simulation), What to watch (3 bullets)."
+    user = HumanMessage(
+        content=f"""
+Ticker: {state['ticker']}
+
+KPIs:
+{state['kpis']}
+
+Signals:
+{state['tech']}
+
+Simulation outlook:
+{state['outlook']}
+
+Retrieved context metadata:
+{ {k: v for k, v in context.items() if k != "snippets"} }
+
+Retrieved text snippets (may be empty):
+{context_snips[:2]}
+
+Write sections:
+1) Summary (3-6 bullets)
+2) Quant snapshot (KPIs + what MA200/MA50 signal implies)
+3) Risks and catalysts (use retrieved context if available)
+4) Future outlook (simulation; include probabilities and interval interpretation)
+5) What to watch (next 30-90 days)
+"""
     )
 
-    msg = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-    report = msg.content if hasattr(msg, "content") else str(msg)
-    return {"report": report}
+    report = llm.invoke([sys, user]).content
+    return {"report": report, **_trace(state, "synthesize_report", t0)}
 
 
 def build_graph():
     g = StateGraph(ResearchState)
 
-    g.add_node("validate", _validate)
-    g.add_node("fetch_data", _fetch_data)
-    g.add_node("compute_numbers", _compute_numbers)
-    g.add_node("simulate_outlook", _simulate_outlook)
-    g.add_node("retrieve_context", _retrieve_context)
-    g.add_node("synthesize_report", _synthesize_report)
+    g.add_node("validate", validate_node)
+    g.add_node("fetch", fetch_node)
+    g.add_node("numbers", numbers_node)
+    g.add_node("outlook", outlook_node)
+    g.add_node("retrieve", retrieval_node)
+    g.add_node("synthesize", synthesis_node)
 
     g.set_entry_point("validate")
 
-    # If validation produced error, stop
-    def _route_after_validate(state: ResearchState) -> str:
-        return END if state.get("error") else "fetch_data"
-
-    g.add_conditional_edges("validate", _route_after_validate, {END: END, "fetch_data": "fetch_data"})
-
-    g.add_edge("fetch_data", "compute_numbers")
-    g.add_edge("compute_numbers", "simulate_outlook")
-    g.add_edge("simulate_outlook", "retrieve_context")
-    g.add_edge("retrieve_context", "synthesize_report")
-    g.add_edge("synthesize_report", END)
+    g.add_edge("validate", "fetch")
+    g.add_edge("fetch", "numbers")
+    g.add_edge("numbers", "outlook")
+    g.add_edge("outlook", "retrieve")
+    g.add_edge("retrieve", "synthesize")
+    g.add_edge("synthesize", END)
 
     return g.compile()
 
 
-_GRAPH = None
+_GRAPH = build_graph()
 
 
 def run_agentic_research(
@@ -248,33 +243,29 @@ def run_agentic_research(
     lookback_years: int = 5,
     horizon_days: int = 60,
     n_sims: int = 3000,
-    docs_dir: Optional[str] = None,
+    docs_dir: str = "./data/docs",
+    use_sec: bool = True,
+    sec_forms: List[str] | None = None,
+    sec_max_chars: int = 12000,
 ) -> Dict[str, Any]:
-    global _GRAPH
-    if _GRAPH is None:
-        _GRAPH = build_graph()
+    if sec_forms is None:
+        sec_forms = ["10-K", "10-Q", "S-1"]
 
     init: ResearchState = {
         "ticker": ticker,
-        "lookback_years": int(lookback_years),
-        "horizon_days": int(horizon_days),
-        "n_sims": int(n_sims),
-        "docs_dir": docs_dir or os.getenv("DOCS_DIR", "./data/docs"),
+        "lookback_years": lookback_years,
+        "horizon_days": horizon_days,
+        "n_sims": n_sims,
+        "docs_dir": docs_dir,
+        "use_sec": use_sec,
+        "sec_forms": sec_forms,
+        "sec_max_chars": sec_max_chars,
+        "trace": [],
     }
 
-    out: ResearchState = _GRAPH.invoke(init)
+    out = _GRAPH.invoke(init)
 
     if out.get("error"):
         raise RuntimeError(out["error"])
 
-    # Return a clean payload for the UI
-    return {
-        "ticker": out["ticker"],
-        "df": out["df"],
-        "kpis": out["kpis"],
-        "tech": out["tech"],
-        "outlook": out["outlook"],
-        "retrieved": out.get("retrieved", {"enabled": False, "snippets": []}),
-        "report": out["report"],
-        "audit": out.get("audit", {}),
-    }
+    return out
