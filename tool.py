@@ -65,6 +65,57 @@ def fetch_prices_yfinance(
     return df, audit
 
 
+def fetch_watchlist_snapshot(tickers: List[str], lookback_days: int = 7) -> pd.DataFrame:
+    if not tickers:
+        raise ValueError("tickers list is empty")
+
+    data = yf.download(
+        tickers,
+        period=f"{lookback_days}d",
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        group_by="column",
+    )
+
+    if data is None or data.empty:
+        raise RuntimeError("No data returned for watchlist")
+
+    if isinstance(data.columns, pd.MultiIndex):
+        close = data["Close"]
+        volume = data["Volume"] if "Volume" in data else None
+    else:
+        close = data[["Close"]].rename(columns={"Close": tickers[0]})
+        volume = data[["Volume"]].rename(columns={"Volume": tickers[0]}) if "Volume" in data else None
+
+    rows = []
+    for ticker in close.columns:
+        series = close[ticker].dropna()
+        if series.empty:
+            continue
+        last = float(series.iloc[-1])
+        prev = float(series.iloc[-2]) if len(series) > 1 else last
+        change = last - prev
+        pct = (change / prev) if prev else 0.0
+        vol = float(volume[ticker].iloc[-1]) if volume is not None and ticker in volume else np.nan
+        rows.append(
+            {
+                "Symbol": ticker,
+                "Last": last,
+                "Chg": change,
+                "Chg %": pct,
+                "Vol": vol,
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("No rows available for watchlist snapshot")
+
+    frame = pd.DataFrame(rows)
+    frame["Trend"] = np.where(frame["Chg"] >= 0, "Up", "Down")
+    return frame.sort_values("Chg %", ascending=False).reset_index(drop=True)
+
+
 # ---------------------------
 # Technical indicators
 # ---------------------------

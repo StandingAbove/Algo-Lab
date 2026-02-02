@@ -39,6 +39,7 @@ class ResearchState(TypedDict, total=False):
     lookback_years: int
     horizon_days: int
     n_sims: int
+    scenario_name: str
 
     docs_dir: str
     use_sec: bool
@@ -74,6 +75,7 @@ def validate_node(state: ResearchState) -> ResearchState:
         "lookback_years": int(state.get("lookback_years", 5)),
         "horizon_days": int(state.get("horizon_days", 60)),
         "n_sims": int(state.get("n_sims", 3000)),
+        "scenario_name": str(state.get("scenario_name", "Base Case")),
         "docs_dir": state.get("docs_dir", "./data/docs"),
         "use_sec": bool(state.get("use_sec", True)),
         "sec_forms": list(state.get("sec_forms", ["10-K", "10-Q", "S-1"])),
@@ -184,6 +186,7 @@ def synthesis_node(state: ResearchState) -> ResearchState:
     user = HumanMessage(
         content=f"""
 Ticker: {state['ticker']}
+Scenario: {state.get('scenario_name', 'Base Case')}
 
 KPIs:
 {state['kpis']}
@@ -243,6 +246,7 @@ def run_agentic_research(
     lookback_years: int = 5,
     horizon_days: int = 60,
     n_sims: int = 3000,
+    scenario_name: str = "Base Case",
     docs_dir: str = "./data/docs",
     use_sec: bool = True,
     sec_forms: List[str] | None = None,
@@ -256,6 +260,7 @@ def run_agentic_research(
         "lookback_years": lookback_years,
         "horizon_days": horizon_days,
         "n_sims": n_sims,
+        "scenario_name": scenario_name,
         "docs_dir": docs_dir,
         "use_sec": use_sec,
         "sec_forms": sec_forms,

@@ -2,7 +2,7 @@
 
 A lightweight quantitative research dashboard built with **Streamlit**, **yfinance**, and optional **Groq LLM** support.
 
-The app pulls historical market data, computes key risk/return metrics, visualizes price action with technical indicators, and generates a **stochastic future outlook** using Monte Carlo simulation. It is designed to look and feel like a real buy-side research tool, not a toy demo.
+The app pulls historical market data, computes key risk/return metrics, visualizes price action with technical indicators, and generates a **stochastic future outlook** using Monte Carlo simulation. It is designed to feel like a professional research terminal with a TradingView-inspired layout, not a toy demo.
 
 ---
 
@@ -25,6 +25,7 @@ The app pulls historical market data, computes key risk/return metrics, visualiz
 
 ### Visualization
 
+* Trading desk-inspired UI layout and navigation
 * Interactive **candlestick** or **close-line** chart
 * Volume chart
 * Overlayed moving averages
@@ -37,6 +38,12 @@ The app pulls historical market data, computes key risk/return metrics, visualiz
 * Median path and uncertainty bands (10–90, 25–75 percentiles)
 * Probability of finishing above current price
 * Clearly labeled as a **simulation**, not a prediction
+
+### Research Experience
+
+* Dedicated pages for Start, Research, Scenarios, Report, and Workflow
+* Scenario presets for base/bull/bear/high-volatility regimes
+* Market universe watchlist snapshot across major tickers
 
 ### Research Notes (Optional)
 
@@ -51,6 +58,7 @@ The app pulls historical market data, computes key risk/return metrics, visualiz
 .
 ├── app.py               # Streamlit UI
 ├── agent_engine.py      # Data, analytics, simulation, reporting
+├── tool.py              # Market data + watchlist utilities
 ├── requirements.txt     # Python dependencies
 ├── .env                 # Local environment variables (not committed)
 └── README.md
@@ -158,5 +166,4 @@ This makes the project suitable for:
 
 This project is for **educational and research purposes only**.
 It is not investment advice.
-
 

@@ -4,6 +4,7 @@ import streamlit as st
 import plotly.graph_objects as go
 
 from agent_engine import run_agentic_research
+from tool import fetch_watchlist_snapshot
 
 st.set_page_config(page_title="Quant Research Agent", layout="wide")
 
@@ -167,6 +168,40 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+SCENARIOS = {
+    "Base Case": {
+        "description": "Balanced assumptions using recent drift/volatility.",
+        "lookback": 5,
+        "horizon": 60,
+        "sims": 3000,
+    },
+    "Bull Run": {
+        "description": "Longer horizon with more simulations to capture upside tails.",
+        "lookback": 5,
+        "horizon": 120,
+        "sims": 5000,
+    },
+    "Bear Shock": {
+        "description": "Shorter horizon, higher focus on downside risk.",
+        "lookback": 3,
+        "horizon": 45,
+        "sims": 3000,
+    },
+    "High Vol": {
+        "description": "Stress test with more Monte Carlo paths.",
+        "lookback": 1,
+        "horizon": 90,
+        "sims": 5000,
+    },
+}
+
+WATCHLIST = ["AAPL", "MSFT", "NVDA", "AMZN", "TSLA", "GOOGL", "META", "JPM"]
+
+if "page" not in st.session_state:
+    st.session_state.page = "Start"
+if "scenario_preset" not in st.session_state:
+    st.session_state.scenario_preset = "Base Case"
+
 st.markdown(
     """
     <div class="hero">
@@ -185,6 +220,12 @@ plot_theme = dict(
     font=dict(color="#e2e8f0"),
 )
 
+
+@st.cache_data(ttl=900)
+def get_watchlist_snapshot(symbols: list[str]):
+    return fetch_watchlist_snapshot(symbols)
+
+
 with st.sidebar:
     st.markdown(
         """
@@ -198,20 +239,52 @@ with st.sidebar:
     )
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Navigation</div>', unsafe_allow_html=True)
+    nav = st.radio(
+        "Navigate",
+        ["Start", "Research", "Scenarios", "Report", "Workflow"],
+        index=["Start", "Research", "Scenarios", "Report", "Workflow"].index(st.session_state.page),
+        label_visibility="collapsed",
+    )
+    st.session_state.page = nav
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-title">Market Focus</div>', unsafe_allow_html=True)
-    ticker = st.text_input("Ticker", "NVDA")
-    lookback = st.selectbox("Lookback (years)", [1, 3, 5, 10], index=2)
+    ticker = st.text_input("Ticker", "NVDA", key="ticker")
+    lookback = st.selectbox("Lookback (years)", [1, 3, 5, 10], index=2, key="lookback_years")
     st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-    horizon = st.slider("Outlook horizon (days)", 20, 252, 60)
-    sims = st.selectbox("Monte Carlo simulations", [1000, 3000, 5000], index=1)
+    horizon = st.slider("Outlook horizon (days)", 20, 252, 60, key="horizon_days")
+    sims = st.selectbox("Monte Carlo simulations", [1000, 3000, 5000], index=1, key="n_sims")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-card-title">Context Layer</div>', unsafe_allow_html=True)
-    docs_dir = st.text_input("Local docs dir (optional)", "./data/docs")
-    use_sec = st.toggle("If no local docs, pull SEC filing", value=True)
-    forms = st.multiselect("Filing types", ["10-K", "10-Q", "S-1"], default=["10-K", "10-Q", "S-1"])
-    sec_max_chars = st.slider("SEC text max length", 3000, 20000, 12000, step=1000)
+    docs_dir = st.text_input("Local docs dir (optional)", "./data/docs", key="docs_dir")
+    use_sec = st.toggle("If no local docs, pull SEC filing", value=True, key="use_sec")
+    forms = st.multiselect(
+        "Filing types",
+        ["10-K", "10-Q", "S-1"],
+        default=["10-K", "10-Q", "S-1"],
+        key="sec_forms",
+    )
+    sec_max_chars = st.slider("SEC text max length", 3000, 20000, 12000, step=1000, key="sec_max_chars")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-card-title">Scenario Preset</div>', unsafe_allow_html=True)
+    preset = st.selectbox(
+        "Scenario preset",
+        list(SCENARIOS.keys()),
+        index=list(SCENARIOS.keys()).index(st.session_state.scenario_preset),
+    )
+    st.session_state.scenario_preset = preset
+    st.caption(SCENARIOS[preset]["description"])
+    if st.button("Apply preset"):
+        st.session_state.scenario_preset = preset
+        st.session_state.lookback_years = SCENARIOS[preset]["lookback"]
+        st.session_state.horizon_days = SCENARIOS[preset]["horizon"]
+        st.session_state.n_sims = SCENARIOS[preset]["sims"]
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
@@ -220,162 +293,223 @@ with st.sidebar:
     run = st.button("Run research", type="primary")
     st.markdown("</div>", unsafe_allow_html=True)
 
-if not run:
-    st.info("Set inputs and click Run research.")
-    st.stop()
+if run:
+    st.session_state.page = "Research"
+    with st.spinner("Running agent workflow..."):
+        out = run_agentic_research(
+            ticker=ticker,
+            lookback_years=int(lookback),
+            horizon_days=int(horizon),
+            n_sims=int(sims),
+            scenario_name=preset,
+            docs_dir=docs_dir,
+            use_sec=bool(use_sec),
+            sec_forms=forms if forms else ["10-K", "10-Q", "S-1"],
+            sec_max_chars=int(sec_max_chars),
+        )
+    st.session_state.last_output = out
+    st.session_state.last_inputs = {
+        "ticker": ticker,
+        "scenario": st.session_state.scenario_preset,
+        "lookback": lookback,
+        "horizon": horizon,
+        "sims": sims,
+    }
 
-with st.spinner("Running agent workflow..."):
-    out = run_agentic_research(
-        ticker=ticker,
-        lookback_years=int(lookback),
-        horizon_days=int(horizon),
-        n_sims=int(sims),
-        docs_dir=docs_dir,
-        use_sec=bool(use_sec),
-        sec_forms=forms if forms else ["10-K", "10-Q", "S-1"],
-        sec_max_chars=int(sec_max_chars),
+page = st.session_state.page
+last_output = st.session_state.get("last_output")
+
+if page == "Start":
+    st.markdown("### Welcome to the Quant Research Desk")
+    st.write(
+        "Launch a research session, explore scenario presets, and track a cross-market watchlist "
+        "before diving into deep Monte Carlo analytics."
     )
 
-df = out["df"]
-kpis = out["kpis"]
-outlook = out["outlook"]
-report = out["report"]
-trace = out["trace"]
-retrieved = out.get("retrieved", {})
+    st.markdown('<div class="section-title">Market universe snapshot</div>', unsafe_allow_html=True)
+    try:
+        watchlist = get_watchlist_snapshot(WATCHLIST)
+        st.dataframe(
+            watchlist,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Last": st.column_config.NumberColumn(format="%.2f"),
+                "Chg": st.column_config.NumberColumn(format="%.2f"),
+                "Chg %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Vol": st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
+    except Exception as exc:
+        st.warning(f"Watchlist unavailable: {exc}")
 
-cols = st.columns(6)
-cols[0].metric("Last Close", f"{kpis['last_close']:.2f}")
-cols[1].metric("CAGR", f"{kpis['cagr']*100:.2f}%")
-cols[2].metric("Ann Return", f"{kpis['ann_return']*100:.2f}%")
-cols[3].metric("Ann Vol", f"{kpis['ann_vol']*100:.2f}%")
-cols[4].metric("Sharpe", f"{kpis['sharpe_0rf']:.2f}")
-cols[5].metric("Max DD", f"{kpis['max_drawdown']*100:.2f}%")
+    if st.button("Enter Research Desk"):
+        st.session_state.page = "Research"
+        st.rerun()
 
-tab1, tab2, tab3 = st.tabs(["Dashboard", "Report", "Workflow"])
+if page in ["Research", "Report", "Workflow", "Scenarios"] and not last_output and page != "Scenarios":
+    st.info("Set inputs in the sidebar and click Run research to generate outputs.")
 
-with tab1:
-    left, right = st.columns([2, 1])
+if page == "Scenarios":
+    st.markdown("### Scenario Library")
+    st.write("Apply presets to explore how market regimes shift your simulation lens.")
+    for name, info in SCENARIOS.items():
+        st.markdown(
+            f"""
+            <div class="sidebar-card">
+              <div class="sidebar-card-title">{name}</div>
+              <p>{info['description']}</p>
+              <p><strong>Lookback:</strong> {info['lookback']}y · <strong>Horizon:</strong> {info['horizon']}d · <strong>Sims:</strong> {info['sims']}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button(f"Apply {name}"):
+            st.session_state.scenario_preset = name
+            st.session_state.lookback_years = info["lookback"]
+            st.session_state.horizon_days = info["horizon"]
+            st.session_state.n_sims = info["sims"]
+            st.success(f"{name} applied. Go to Research to run the simulation.")
 
-    with left:
-        st.markdown('<div class="section-title">Market trend & moving averages</div>', unsafe_allow_html=True)
-        fig = go.Figure()
-        fig.add_trace(
+if last_output and page in ["Research", "Report", "Workflow"]:
+    df = last_output["df"]
+    kpis = last_output["kpis"]
+    outlook = last_output["outlook"]
+    report = last_output["report"]
+    trace = last_output["trace"]
+    retrieved = last_output.get("retrieved", {})
+
+    if page == "Research":
+        cols = st.columns(6)
+        cols[0].metric("Last Close", f"{kpis['last_close']:.2f}")
+        cols[1].metric("CAGR", f"{kpis['cagr']*100:.2f}%")
+        cols[2].metric("Ann Return", f"{kpis['ann_return']*100:.2f}%")
+        cols[3].metric("Ann Vol", f"{kpis['ann_vol']*100:.2f}%")
+        cols[4].metric("Sharpe", f"{kpis['sharpe_0rf']:.2f}")
+        cols[5].metric("Max DD", f"{kpis['max_drawdown']*100:.2f}%")
+
+        left, right = st.columns([2, 1])
+
+        with left:
+            st.markdown('<div class="section-title">Market trend & moving averages</div>', unsafe_allow_html=True)
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["Close"],
+                    name="Close",
+                    line=dict(color="#38bdf8", width=2.6),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["MA20"],
+                    name="MA20",
+                    line=dict(color="#22c55e", width=1.6, dash="dot"),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["MA50"],
+                    name="MA50",
+                    line=dict(color="#f97316", width=1.8, dash="dash"),
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=df.index,
+                    y=df["MA200"],
+                    name="MA200",
+                    line=dict(color="#a855f7", width=2.2),
+                )
+            )
+            fig.update_layout(
+                height=520,
+                title=f"{ticker.upper()} Price + Moving Averages",
+                **plot_theme,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=10, r=10, t=60, b=20),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with right:
+            st.markdown('<div class="section-title">Context source</div>', unsafe_allow_html=True)
+            st.write(f"Enabled: {retrieved.get('enabled', False)}")
+            st.write(f"Source: {retrieved.get('source', 'n/a')}")
+            if retrieved.get("source") == "sec" and retrieved.get("enabled"):
+                st.write(f"Form: {retrieved.get('form')}")
+                st.write(f"Filing date: {retrieved.get('filing_date')}")
+                url = retrieved.get("url")
+                if url:
+                    st.link_button("Open filing", url)
+            else:
+                reason = retrieved.get("reason")
+                if reason:
+                    st.caption(f"Reason: {reason}")
+
+        st.markdown('<div class="section-title">Future outlook (Monte Carlo simulation)</div>', unsafe_allow_html=True)
+        x = list(range(1, outlook["horizon_days"] + 1))
+        b = outlook["bands"]
+        sample_paths = outlook.get("sample_paths", [])
+
+        fig2 = go.Figure()
+        for path in sample_paths[:40]:
+            fig2.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=path,
+                    mode="lines",
+                    line=dict(color="rgba(148, 163, 184, 0.15)", width=1),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+        fig2.add_trace(
             go.Scatter(
-                x=df.index,
-                y=df["Close"],
-                name="Close",
-                line=dict(color="#38bdf8", width=2.6),
+                x=x,
+                y=b["q90"],
+                name="90th",
+                line=dict(color="rgba(56, 189, 248, 0.9)", width=1.4),
             )
         )
-        fig.add_trace(
+        fig2.add_trace(
             go.Scatter(
-                x=df.index,
-                y=df["MA20"],
-                name="MA20",
-                line=dict(color="#22c55e", width=1.6, dash="dot"),
+                x=x,
+                y=b["q10"],
+                name="10th",
+                line=dict(color="rgba(56, 189, 248, 0.4)", width=1.4),
+                fill="tonexty",
+                fillcolor="rgba(56, 189, 248, 0.18)",
             )
         )
-        fig.add_trace(
+        fig2.add_trace(
             go.Scatter(
-                x=df.index,
-                y=df["MA50"],
-                name="MA50",
-                line=dict(color="#f97316", width=1.8, dash="dash"),
+                x=x,
+                y=b["q50"],
+                name="Median",
+                line=dict(color="#f8fafc", width=2.4),
             )
         )
-        fig.add_trace(
-            go.Scatter(
-                x=df.index,
-                y=df["MA200"],
-                name="MA200",
-                line=dict(color="#a855f7", width=2.2),
-            )
-        )
-        fig.update_layout(
-            height=520,
-            title=f"{ticker.upper()} Price + Moving Averages",
+        fig2.update_layout(
+            height=420,
+            title="Simulated price distribution bands",
             **plot_theme,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             margin=dict(l=10, r=10, t=60, b=20),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True)
 
-    with right:
-        st.markdown('<div class="section-title">Context source</div>', unsafe_allow_html=True)
-        st.write(f"Enabled: {retrieved.get('enabled', False)}")
-        st.write(f"Source: {retrieved.get('source', 'n/a')}")
-        if retrieved.get("source") == "sec" and retrieved.get("enabled"):
-            st.write(f"Form: {retrieved.get('form')}")
-            st.write(f"Filing date: {retrieved.get('filing_date')}")
-            url = retrieved.get("url")
-            if url:
-                st.link_button("Open filing", url)
-        else:
-            reason = retrieved.get("reason")
-            if reason:
-                st.caption(f"Reason: {reason}")
+        mc_cols = st.columns(3)
+        mc_cols[0].metric("Prob finish up", f"{outlook['prob_finish_up']*100:.1f}%")
+        mc_cols[1].metric("Ann drift (μ)", f"{outlook['mu_ann']*100:.2f}%")
+        mc_cols[2].metric("Ann vol (σ)", f"{outlook['vol_ann']*100:.2f}%")
 
-    st.markdown('<div class="section-title">Future outlook (Monte Carlo simulation)</div>', unsafe_allow_html=True)
-    x = list(range(1, outlook["horizon_days"] + 1))
-    b = outlook["bands"]
-    sample_paths = outlook.get("sample_paths", [])
+    if page == "Report":
+        st.markdown(report)
 
-    fig2 = go.Figure()
-    for path in sample_paths[:40]:
-        fig2.add_trace(
-            go.Scatter(
-                x=x,
-                y=path,
-                mode="lines",
-                line=dict(color="rgba(148, 163, 184, 0.15)", width=1),
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
-    fig2.add_trace(
-        go.Scatter(
-            x=x,
-            y=b["q90"],
-            name="90th",
-            line=dict(color="rgba(56, 189, 248, 0.9)", width=1.4),
-        )
-    )
-    fig2.add_trace(
-        go.Scatter(
-            x=x,
-            y=b["q10"],
-            name="10th",
-            line=dict(color="rgba(56, 189, 248, 0.4)", width=1.4),
-            fill="tonexty",
-            fillcolor="rgba(56, 189, 248, 0.18)",
-        )
-    )
-    fig2.add_trace(
-        go.Scatter(
-            x=x,
-            y=b["q50"],
-            name="Median",
-            line=dict(color="#f8fafc", width=2.4),
-        )
-    )
-    fig2.update_layout(
-        height=420,
-        title="Simulated price distribution bands",
-        **plot_theme,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=10, r=10, t=60, b=20),
-    )
-    st.plotly_chart(fig2, use_container_width=True)
-
-    mc_cols = st.columns(3)
-    mc_cols[0].metric("Prob finish up", f"{outlook['prob_finish_up']*100:.1f}%")
-    mc_cols[1].metric("Ann drift (μ)", f"{outlook['mu_ann']*100:.2f}%")
-    mc_cols[2].metric("Ann vol (σ)", f"{outlook['vol_ann']*100:.2f}%")
-
-with tab2:
-    st.markdown(report)
-
-with tab3:
-    st.markdown("**LangGraph execution trace**")
-    for t in trace:
-        st.write(f"- {t['node']} ({t['ms']} ms)")
+    if page == "Workflow":
+        st.markdown("**LangGraph execution trace**")
+        for t in trace:
+            st.write(f"- {t['node']} ({t['ms']} ms)")
