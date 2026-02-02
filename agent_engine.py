@@ -18,21 +18,10 @@ from tool import (
 )
 
 try:
+    from langchain_groq import ChatGroq
     from langchain_core.messages import SystemMessage, HumanMessage
 except Exception:
-    SystemMessage = None
-    HumanMessage = None
-
-try:
-    from langchain_groq import ChatGroq
-except Exception:
     ChatGroq = None
-
-try:
-    from langchain_openai import ChatOpenAI
-except Exception:
-    ChatOpenAI = None
-
 
 class ResearchState(TypedDict, total=False):
     ticker: str
@@ -61,6 +50,35 @@ def _trace(state: ResearchState, node: str, start: float) -> Dict[str, Any]:
     tr = list(state.get("trace", []))
     tr.append({"node": node, "ms": int((time.perf_counter() - start) * 1000)})
     return {"trace": tr}
+
+
+
+def _clip_text(s: str, max_chars: int) -> str:
+    if not s:
+        return ""
+    s = str(s)
+    return s if len(s) <= max_chars else (s[:max_chars] + "…")
+
+def _safe_outlook(outlook: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(outlook, dict):
+        return {}
+    bands = outlook.get("bands") or {}
+    def _last(name: str):
+        arr = bands.get(name)
+        if isinstance(arr, list) and arr:
+            return arr[-1]
+        return None
+    return {
+        "spot": outlook.get("spot"),
+        "mu_ann": outlook.get("mu_ann"),
+        "vol_ann": outlook.get("vol_ann"),
+        "horizon_days": outlook.get("horizon_days"),
+        "n_sims": outlook.get("n_sims"),
+        "prob_finish_up": outlook.get("prob_finish_up"),
+        "terminal_q10": _last("q10"),
+        "terminal_q50": _last("q50"),
+        "terminal_q90": _last("q90"),
+    }
 
 
 def validate_node(state: ResearchState) -> ResearchState:
@@ -143,33 +161,31 @@ def retrieval_node(state: ResearchState) -> ResearchState:
 def synthesis_node(state: ResearchState) -> ResearchState:
     t0 = time.perf_counter()
 
-    openai_key = os.getenv("GPT_API_KEY", "").strip()
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
-
-    if (not groq_key or ChatGroq is None) and (not openai_key or ChatOpenAI is None):
-        report = f"Deterministic report for {state['ticker']} (no LLM key configured)."
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+    if ChatGroq is None or not groq_key:
+        report = f"Deterministic report for {state['ticker']} (GROQ_API_KEY missing)."
         return {"report": report, **_trace(state, "synthesize_report", t0)}
 
-    # Prefer Groq (fast, no OpenAI quota). Fallback to OpenAI if configured.
-    if groq_key and ChatGroq is not None:
-        llm = ChatGroq(
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            temperature=0.1,
-            api_key=groq_key,
-        )
-    elif openai_key and ChatOpenAI is not None:
-        llm = ChatOpenAI(
-            model=os.getenv("OPENAI_MODEL", "gpt-5"),
-            temperature=0.1,
-            api_key=openai_key,
-        )
-    else:
-        raise RuntimeError(
-            "No LLM configured. Set GROQ_API_KEY (recommended) or GPT_API_KEY."
-        )
+    # Guard against stale/decommissioned model names
+    if model == "llama-3.1-70b-versatile":
+        model = "llama-3.3-70b-versatile"
+
+    llm = ChatGroq(
+        model=model,
+        temperature=0.1,
+        api_key=groq_key,
+    )
 
     context = state.get("retrieved", {})
     context_snips = context.get("snippets", [])
+
+    # Hard caps to avoid oversized requests (Groq TPD / payload limits)
+    snip_cap = int(os.getenv("SNIPPET_CAP_CHARS", "1200"))
+    max_snips = int(os.getenv("MAX_SNIPPETS", "2"))
+    context_snips = [_clip_text(s, snip_cap) for s in (context_snips or [])[:max_snips]]
+
+    outlook_small = _safe_outlook(state.get("outlook", {}))
 
     sys = SystemMessage(
         content=(
@@ -191,8 +207,8 @@ KPIs:
 Signals:
 {state['tech']}
 
-Simulation outlook:
-{state['outlook']}
+Simulation outlook (summary only):
+{outlook_small}
 
 Retrieved context metadata:
 { {k: v for k, v in context.items() if k != "snippets"} }
